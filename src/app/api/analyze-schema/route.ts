@@ -18,6 +18,8 @@ type RawMapping = {
   reasoning?: unknown;
 };
 
+const ALLOWED_DATA_TYPES = new Set(["string", "boolean", "integer", "date"]);
+
 function normalizeHeaders(headers: string[]) {
   return headers
     .map((header) => String(header || "").trim())
@@ -25,15 +27,24 @@ function normalizeHeaders(headers: string[]) {
     .filter((header) => !IGNORE_FIELDS.has(header.toLowerCase()));
 }
 
-function coerceMappings(input: unknown) {
+function toSnakeCase(input: string) {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function coerceMappings(input: unknown, headers: string[]) {
+  const headerLookup = new Map(headers.map((header) => [header.toLowerCase(), header]));
   const payload = input as { mappings?: RawMapping[] };
   if (!Array.isArray(payload?.mappings)) return [];
 
-  return payload.mappings
+  const normalizedMappings = payload.mappings
     .map((mapping) => {
       const targetField =
         typeof mapping.target_field === "string"
-          ? mapping.target_field.trim()
+          ? toSnakeCase(mapping.target_field)
           : "";
       const dataType =
         typeof mapping.data_type === "string"
@@ -41,15 +52,18 @@ function coerceMappings(input: unknown) {
           : "";
       const sourceFields = Array.isArray(mapping.source_fields)
         ? mapping.source_fields
-            .map((item) => (typeof item === "string" ? item.trim() : ""))
-            .filter(Boolean)
+          .map((item) => (typeof item === "string" ? item.trim() : ""))
+          .map((sourceField) => headerLookup.get(sourceField.toLowerCase()) || "")
+          .filter(Boolean)
         : [];
       const reasoning =
         typeof mapping.reasoning === "string" ? mapping.reasoning.trim() : "";
 
-      const allowedTypes = new Set(["string", "boolean", "integer", "date"]);
-
-      if (!targetField || !allowedTypes.has(dataType) || sourceFields.length === 0) {
+      if (
+        !targetField ||
+        !ALLOWED_DATA_TYPES.has(dataType) ||
+        sourceFields.length === 0
+      ) {
         return null;
       }
 
@@ -61,6 +75,35 @@ function coerceMappings(input: unknown) {
       };
     })
     .filter((mapping): mapping is NonNullable<typeof mapping> => Boolean(mapping));
+
+  const dedupedByTarget = new Map<
+    string,
+    {
+      target_field: string;
+      data_type: "string" | "boolean" | "integer" | "date";
+      source_fields: string[];
+      reasoning: string;
+    }
+  >();
+
+  for (const mapping of normalizedMappings) {
+    const existing = dedupedByTarget.get(mapping.target_field);
+    if (!existing) {
+      dedupedByTarget.set(mapping.target_field, {
+        ...mapping,
+        source_fields: [...new Set(mapping.source_fields)],
+      });
+      continue;
+    }
+
+    dedupedByTarget.set(mapping.target_field, {
+      ...existing,
+      source_fields: [...new Set([...existing.source_fields, ...mapping.source_fields])],
+      reasoning: existing.reasoning || mapping.reasoning,
+    });
+  }
+
+  return Array.from(dedupedByTarget.values());
 }
 
 export async function POST(request: Request) {
@@ -124,7 +167,7 @@ Return strict JSON in this shape:
 
     const content = completion.choices[0]?.message?.content || "{}";
     const parsed = JSON.parse(content);
-    const mappings = coerceMappings(parsed);
+    const mappings = coerceMappings(parsed, headers);
 
     return Response.json({ mappings });
   } catch (error) {

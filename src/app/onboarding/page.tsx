@@ -100,44 +100,101 @@ export default function DataOnboardingPage() {
   const handleGenerateScript = () => {
     const approvedMappings = mappings.filter((mapping) => mapping.approved);
 
-    let tsCode =
-      "// Generated Stardex Migration ETL Script\n" +
-      "import { db } from './stardex-db';\n\n" +
-      "export async function migrateLegacyData(legacyData: any[]) {\n" +
-      '  console.log("Starting Stardex Migration...");\n\n' +
-      "  const formattedData = legacyData.map((row) => {\n" +
-      "    return {\n";
+    const fieldMapLines = approvedMappings
+      .map(
+        (mapping) =>
+          `  ${JSON.stringify(mapping.target_field)}: [${mapping.source_fields
+            .map((field) => JSON.stringify(field))
+            .join(", ")}] as const,`,
+      )
+      .join("\n");
 
-    for (const mapping of approvedMappings) {
-      const sourceKey = mapping.source_fields[0];
-      if (!sourceKey) continue;
+    const transformLines = approvedMappings
+      .map((mapping) => {
+        const sourceExpr = `pickFirst(row, FIELD_MAP[${JSON.stringify(mapping.target_field)}])`;
+        if (mapping.data_type === "boolean") {
+          return `    ${JSON.stringify(mapping.target_field)}: toBoolean(${sourceExpr}),`;
+        }
+        if (mapping.data_type === "integer") {
+          return `    ${JSON.stringify(mapping.target_field)}: toInteger(${sourceExpr}),`;
+        }
+        if (mapping.data_type === "date") {
+          return `    ${JSON.stringify(mapping.target_field)}: toDate(${sourceExpr}),`;
+        }
+        return `    ${JSON.stringify(mapping.target_field)}: toStringOrNull(${sourceExpr}),`;
+      })
+      .join("\n");
 
-      if (mapping.data_type === "boolean") {
-        tsCode += `      ${mapping.target_field}: ['yes', 'true', '1'].includes(String(row[${JSON.stringify(
-          sourceKey,
-        )}] ?? '').trim().toLowerCase()),\n`;
-      } else if (mapping.data_type === "integer") {
-        tsCode += `      ${mapping.target_field}: Number.parseInt(String(row[${JSON.stringify(
-          sourceKey,
-        )}] ?? '0'), 10) || 0,\n`;
-      } else if (mapping.data_type === "date") {
-        tsCode += `      ${mapping.target_field}: row[${JSON.stringify(
-          sourceKey,
-        )}] ? new Date(row[${JSON.stringify(sourceKey)}]) : null,\n`;
-      } else {
-        tsCode += `      ${mapping.target_field}: row[${JSON.stringify(
-          sourceKey,
-        )}] || null,\n`;
-      }
-    }
+    const tsCode = `// Generated Stardex Migration ETL Script
+import { db } from "./stardex-db";
+// import { candidates } from "./schema";
 
-    tsCode +=
-      "    };\n" +
-      "  });\n\n" +
-      "  // Insert into optimized Stardex schema\n" +
-      "  await db.insert(candidates).values(formattedData);\n" +
-      "  console.log(`Successfully migrated ${formattedData.length} records!`);\n" +
-      "}\n";
+type LegacyRow = Record<string, unknown>;
+
+const FIELD_MAP = {
+${fieldMapLines}
+};
+
+function pickFirst(row: LegacyRow, keys: readonly string[]): unknown {
+  for (const key of keys) {
+    const value = row[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string" && value.trim() === "") continue;
+    return value;
+  }
+  return null;
+}
+
+function toStringOrNull(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function toBoolean(value: unknown): boolean | null {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim().toLowerCase();
+  if (["yes", "y", "true", "1"].includes(normalized)) return true;
+  if (["no", "n", "false", "0"].includes(normalized)) return false;
+  return null;
+}
+
+function toInteger(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return null;
+
+  const hasK = normalized.endsWith("k");
+  const hasM = normalized.endsWith("m");
+  const cleaned = normalized.replace(/[^0-9.\\-]/g, "");
+  const parsed = Number.parseFloat(cleaned);
+  if (Number.isNaN(parsed)) return null;
+
+  const scaled = hasM ? parsed * 1_000_000 : hasK ? parsed * 1_000 : parsed;
+  return Math.round(scaled);
+}
+
+function toDate(value: unknown): Date | null {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+export async function migrateLegacyData(legacyData: LegacyRow[]) {
+  console.log("Starting Stardex migration...");
+
+  const formattedData = legacyData.map((row) => ({
+${transformLines}
+  }));
+
+  // TODO: wire your Drizzle table import, then insert:
+  // await db.insert(candidates).values(formattedData);
+  console.log(\`Prepared \${formattedData.length} transformed records.\`);
+  return formattedData;
+}
+`;
 
     setGeneratedCode(tsCode);
   };

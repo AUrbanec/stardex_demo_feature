@@ -21,13 +21,10 @@ SUPABASE_URL=
 NODE_ENV=development
 ```
 
-## Run (WSL + nvm)
+## Run
 
 ```bash
-cd /home/alex/stardex_demo/stardex-onboarding
-export NVM_DIR="$HOME/.nvm"
-. "$NVM_DIR/nvm.sh"
-nvm use 22.17.1
+npm run install
 npm run dev
 ```
 
